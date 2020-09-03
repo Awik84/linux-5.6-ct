@@ -44,21 +44,15 @@ struct mlx5_tc_ct_debugfs {
 	struct dentry *root;
 };
 
-struct mlx5_tc_ct_table {
-	struct mlx5_flow_table *fdb;
-	struct mlx5_flow_group *main_group;
-	struct mlx5_flow_group *miss_group;
-	struct mlx5_flow_handle *miss_rule;
-};
-
 struct mlx5_tc_ct_priv {
 	struct mlx5_eswitch *esw;
 	const struct net_device *netdev;
 	struct idr fte_ids;
 	struct xarray tuple_ids;
 	struct rhashtable zone_ht;
-	struct mlx5_tc_ct_table *ct;
-	struct mlx5_tc_ct_table *ct_nat;
+	struct mlx5_flow_table *ct;
+	struct mlx5_flow_table *ct_nat;
+
 	struct mlx5_flow_table *post_ct;
 	struct mutex control_lock; /* guards parallel adds/dels */
 };
@@ -535,7 +529,7 @@ mlx5_tc_ct_entry_add_rule(struct mlx5_tc_ct_priv *ct_priv,
 		       MLX5_FLOW_CONTEXT_ACTION_COUNT;
 	attr->dest_chain = 0;
 	attr->dest_ft = ct_priv->post_ct;
-	attr->fdb = nat ? ct_priv->ct_nat->fdb : ct_priv->ct->fdb;
+	attr->fdb = nat ? ct_priv->ct_nat : ct_priv->ct;
 	attr->outer_match_level = MLX5_MATCH_L4;
 	attr->counter = entry->counter;
 	attr->flags |= MLX5_ESW_ATTR_FLAG_NO_IN_PORT;
@@ -1041,7 +1035,7 @@ __mlx5_tc_ct_flow_offload(struct mlx5e_priv *priv,
 
 	/* Change original rule point to ct table */
 	pre_ct_attr->dest_chain = 0;
-	pre_ct_attr->dest_ft = nat ? ct_priv->ct_nat->fdb : ct_priv->ct->fdb;
+	pre_ct_attr->dest_ft = nat ? ct_priv->ct_nat : ct_priv->ct;
 	ct_flow->pre_ct_rule = mlx5_eswitch_add_offloaded_rule(esw,
 							       orig_spec,
 							       pre_ct_attr);
@@ -1268,7 +1262,7 @@ mlx5_tc_ct_init_err(struct mlx5e_rep_priv *rpriv, const char *msg, int err)
 			    err);
 }
 
-static struct mlx5_tc_ct_table *
+/*static struct mlx5_tc_ct_table *
 mlx5_tc_ct_create_ct_table(struct mlx5_eswitch *esw, bool ipv4, bool tcp)
 {
 	struct mlx5_flow_group *main_group, *miss_group;
@@ -1393,7 +1387,7 @@ mlx5_tc_ct_destroy_ct_table(struct mlx5_tc_ct_table *ct_ft)
 	mlx5_destroy_flow_group(ct_ft->main_group);
 	mlx5_destroy_flow_table(ct_ft->fdb);
 	kfree(ct_ft);
-}
+}*/
 
 int
 mlx5_tc_ct_init(struct mlx5_rep_uplink_priv *uplink_priv)
@@ -1423,14 +1417,14 @@ mlx5_tc_ct_init(struct mlx5_rep_uplink_priv *uplink_priv)
 
 	ct_priv->esw = esw;
 	ct_priv->netdev = rpriv->netdev;
-	ct_priv->ct = mlx5_tc_ct_create_ct_table(esw, true, false);
+	ct_priv->ct = mlx5_esw_chains_create_global_table(esw);
 	if (IS_ERR(ct_priv->ct)) {
 		err = PTR_ERR(ct_priv->ct);
 		mlx5_tc_ct_init_err(rpriv, "failed to create ct table", err);
 		goto err_ct_tbl;
 	}
 
-	ct_priv->ct_nat = mlx5_tc_ct_create_ct_table(esw, true, false);
+	ct_priv->ct_nat = mlx5_esw_chains_create_global_table(esw);
 	if (IS_ERR(ct_priv->ct_nat)) {
 		err = PTR_ERR(ct_priv->ct_nat);
 		mlx5_tc_ct_init_err(rpriv, "failed to create ct nat table",
@@ -1457,9 +1451,9 @@ mlx5_tc_ct_init(struct mlx5_rep_uplink_priv *uplink_priv)
 	return 0;
 
 err_post_ct_tbl:
-	mlx5_tc_ct_destroy_ct_table(ct_priv->ct_nat);
+	mlx5_esw_chains_destroy_global_table(esw, ct_priv->ct_nat);
 err_ct_nat_tbl:
-	mlx5_tc_ct_destroy_ct_table(ct_priv->ct);
+	mlx5_esw_chains_destroy_global_table(esw, ct_priv->ct);
 err_ct_tbl:
 	kfree(ct_priv);
 err_alloc:
@@ -1477,8 +1471,8 @@ mlx5_tc_ct_clean(struct mlx5_rep_uplink_priv *uplink_priv)
 		return;
 
 	mlx5_esw_chains_destroy_global_table(ct_priv->esw, ct_priv->post_ct);
-	mlx5_tc_ct_destroy_ct_table(ct_priv->ct_nat);
-	mlx5_tc_ct_destroy_ct_table(ct_priv->ct);
+	mlx5_esw_chains_destroy_global_table(ct_priv->esw, ct_priv->ct_nat);
+	mlx5_esw_chains_destroy_global_table(ct_priv->esw, ct_priv->ct);
 
 	rhashtable_destroy(&ct_priv->zone_ht);
 	mutex_destroy(&ct_priv->control_lock);
